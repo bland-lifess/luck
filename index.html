@@ -237,6 +237,7 @@ body {
 </div>
 <div class="side-panel" id="panel-inv">
   <div class="panel-title">— Your Catch —</div>
+  <div id="inv-summary" style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap;"></div>
   <div class="inv-grid" id="inv-grid"></div>
   <button class="sell-all-btn" onclick="sellAll()">Sell All Fish</button>
 </div>
@@ -420,9 +421,9 @@ function startReel(){
   R.progress=0;
   R.escTimer=0;
   const d=currentFish.diff;
-  R.fillSpeed  = 0.0028;
-  R.drainSpeed = 0.0016 + d*0.004;
-  R.greenSpeed = 0.0006 + d*0.001;
+  R.fillSpeed  = 0.0022;
+  R.drainSpeed = 0.0008 + d*0.0018; // much gentler drain
+  R.greenSpeed = 0.00015 + d*0.0004; // green zone moves slowly
 }
 
 function endReel(success){
@@ -435,6 +436,7 @@ function endReel(success){
     S.totalCaught++;
     save(); updateHUD();
     showToast(currentFish.e+' '+currentFish.name+' — '+RL[currentFish.r]+'!');
+    spawnCatchVFX(currentFish);
   } else {
     showToast('The fish got away! 😤');
   }
@@ -469,35 +471,125 @@ function update(dt){
   }
   if(gState==='reeling') updateReel(dt);
   if(gState==='result'){ resTimer-=dt; if(resTimer<=0) resetToIdle(); }
+  updateParticles(dt);
 }
 
 function updateReel(dt){
-  // Notch: hold = float up, release = sink
-  const GRAVITY=0.0018*dt, LIFT=0.0032*dt;
-  if(R.holding) R.notchVel-=LIFT;
-  else          R.notchVel+=GRAVITY;
-  R.notchVel*=0.88;
-  R.notchY=Math.max(0.01,Math.min(0.99,R.notchY+R.notchVel));
+  // Notch: hold = slowly rise, release = slowly sink
+  // Much gentler constants — bar is forgiving and easy to control
+  const GRAVITY = 0.00045 * dt;   // slow sink
+  const LIFT    = 0.00060 * dt;   // slow rise
+  const DAMPING = 0.94;           // heavy damping = smooth, not jittery
 
-  // Green zone wanders
-  R.greenVel+=(Math.random()-0.5)*R.greenSpeed*dt;
-  R.greenVel*=0.93;
-  const half=R.greenH/2;
-  R.greenY=Math.max(half+0.01,Math.min(1-half-0.01,R.greenY+R.greenVel));
+  if(R.holding) R.notchVel -= LIFT;
+  else          R.notchVel += GRAVITY;
+  R.notchVel *= DAMPING;
+  R.notchY = Math.max(0.01, Math.min(0.99, R.notchY + R.notchVel));
+
+  // Green zone wanders slowly
+  R.greenVel += (Math.random()-0.5) * R.greenSpeed * dt;
+  R.greenVel *= 0.96;
+  const half = R.greenH / 2;
+  R.greenY = Math.max(half+0.02, Math.min(1-half-0.02, R.greenY + R.greenVel));
 
   // In zone?
-  const inZone = R.notchY>=(R.greenY-half) && R.notchY<=(R.greenY+half);
+  const inZone = R.notchY >= (R.greenY-half) && R.notchY <= (R.greenY+half);
   if(inZone){
-    R.progress=Math.min(1,R.progress+R.fillSpeed*dt);
-    R.escTimer=Math.max(0,R.escTimer-3);
+    R.progress = Math.min(1, R.progress + R.fillSpeed * dt);
+    R.escTimer = Math.max(0, R.escTimer - 2);
   } else {
-    R.progress=Math.max(0,R.progress-R.drainSpeed*dt);
-    R.escTimer+=1;
-    if(R.escTimer>380) endReel(false);
+    R.progress = Math.max(0, R.progress - R.drainSpeed * dt);
+    R.escTimer += 1;
+    if(R.escTimer > 500) endReel(false); // ~8s grace before fail
   }
-  if(R.progress>=1) endReel(true);
+  if(R.progress >= 1) endReel(true);
 }
 
+// =============================================
+// PARTICLE VFX
+// =============================================
+let particles = [];
+
+function spawnCatchVFX(fish){
+  const rarities = ['rare','epic','legendary','mythic'];
+  if(!rarities.includes(fish.r)) return;
+  const color = RC[fish.r];
+  const cx = W/2, cy = H*0.45;
+  const count = fish.r==='mythic'?80 : fish.r==='legendary'?60 : fish.r==='epic'?45 : 28;
+
+  // Ring burst
+  for(let i=0;i<count;i++){
+    const angle = (i/count)*Math.PI*2;
+    const speed = 1.5 + Math.random()*3.5;
+    particles.push({
+      x:cx, y:cy,
+      vx:Math.cos(angle)*speed,
+      vy:Math.sin(angle)*speed - 1,
+      life:1.0, decay:0.012+Math.random()*0.01,
+      r:2+Math.random()*4,
+      color,
+      type:'spark'
+    });
+  }
+  // Floating emoji burst
+  for(let i=0;i<8;i++){
+    particles.push({
+      x:cx+(Math.random()-0.5)*80,
+      y:cy+(Math.random()-0.5)*40,
+      vx:(Math.random()-0.5)*1.2,
+      vy:-0.8-Math.random()*1.5,
+      life:1.0, decay:0.007,
+      r:14+Math.random()*10,
+      color,
+      type:'star',
+      angle:Math.random()*Math.PI*2,
+      spin:(Math.random()-0.5)*0.08
+    });
+  }
+  // Screen flash
+  particles.push({type:'flash', life:1.0, decay:0.06, color});
+}
+
+function updateParticles(dt){
+  for(let i=particles.length-1;i>=0;i--){
+    const p=particles[i];
+    p.life -= p.decay * (dt/16.67);
+    if(p.life<=0){particles.splice(i,1);continue;}
+    if(p.type==='spark'||p.type==='star'){
+      p.x+=p.vx*(dt/16.67);
+      p.y+=p.vy*(dt/16.67);
+      p.vy+=0.04*(dt/16.67); // gravity
+    }
+    if(p.type==='star') p.angle+=p.spin;
+  }
+}
+
+function drawParticles(){
+  for(const p of particles){
+    if(p.type==='flash'){
+      ctx.save();
+      ctx.globalAlpha=p.life*0.35;
+      ctx.fillStyle=p.color;
+      ctx.fillRect(0,0,W,H);
+      ctx.restore();
+      continue;
+    }
+    ctx.save();
+    ctx.globalAlpha=p.life;
+    if(p.type==='spark'){
+      ctx.beginPath(); ctx.arc(p.x,p.y,p.r,0,Math.PI*2);
+      ctx.fillStyle=p.color; ctx.fill();
+      ctx.shadowColor=p.color; ctx.shadowBlur=8;
+      ctx.fill();
+    } else if(p.type==='star'){
+      ctx.translate(p.x,p.y); ctx.rotate(p.angle);
+      ctx.font=`${p.r}px serif`;
+      ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText('✦',0,0);
+    }
+    ctx.restore();
+  }
+}
 // =============================================
 // DRAWING HELPERS
 // =============================================
@@ -544,6 +636,7 @@ function draw(){
   if(gState==='reeling') drawReelUI();
   if(gState==='result')  drawResult();
   if(gState==='idle')    drawPrompt();
+  drawParticles();
 }
 
 function drawSky(){
@@ -587,7 +680,7 @@ function drawMoon(){
 
 function waterY(){ return H*0.60; }
 function pierY(){ return H*0.57; }
-function charBaseX(){ return W*0.25; }
+function charBaseX(){ return W*0.62; }  // pier right edge
 function charBaseY(){ return pierY()-2; }
 
 function drawWater(){
@@ -652,11 +745,10 @@ function drawPier(){
 }
 
 function getRodTip(){
-  // In resting/cast state, rod tip position
   const bx=charBaseX(), by=charBaseY();
-  const angle = gState==='idle' ? 0.35 : -0.55;
-  const handX=bx+12, handY=by-32;
-  const rodLen=42;
+  const angle = gState==='idle' ? 0.4 : -0.6;
+  const handX=bx+14, handY=by-22;
+  const rodLen=44;
   return {
     hx:handX, hy:handY,
     tx:handX+Math.cos(angle)*rodLen,
@@ -666,7 +758,7 @@ function getRodTip(){
 
 function bobberPos(){
   const wy=waterY();
-  const bx=W*0.63;
+  const bx=W*0.82;  // bobber out to the right past pier edge
   const by=wy+2+Math.sin(biteT*0.004)*3;
   return {x:bx,y:by};
 }
@@ -674,46 +766,84 @@ function bobberPos(){
 function drawCharAndRod(){
   const bx=charBaseX(), by=charBaseY();
   const t=Date.now()*0.001;
-  const bob=gState==='waiting'?Math.sin(t*2)*1.2:0;
+  const bob=gState==='waiting'?Math.sin(t*2.2)*1.5:Math.sin(t*0.9)*0.6;
 
   ctx.save();
-  ctx.translate(bx,by+bob);
+  ctx.translate(bx, by+bob);
 
   // shadow
-  ctx.beginPath(); ctx.ellipse(0,3,9,2.5,0,0,Math.PI*2);
-  ctx.fillStyle='rgba(0,0,0,0.35)'; ctx.fill();
+  ctx.beginPath(); ctx.ellipse(0,4,11,3,0,0,Math.PI*2);
+  ctx.fillStyle='rgba(0,0,0,0.3)'; ctx.fill();
 
-  // boots
-  ctx.fillStyle='#231003';
-  ctx.fillRect(-8,-8,7,10); ctx.fillRect(2,-8,7,10);
+  // BODY — round blobby shape, teal/dark
+  ctx.beginPath();
+  ctx.ellipse(0,-18,12,16,0,0,Math.PI*2);
+  ctx.fillStyle='#1a4a50';
+  ctx.fill();
+  // body highlight
+  ctx.beginPath();
+  ctx.ellipse(-3,-22,5,7,Math.PI*0.15,0,Math.PI*2);
+  ctx.fillStyle='rgba(78,205,196,0.18)';
+  ctx.fill();
 
-  // pants
-  ctx.fillStyle='#1a3060';
-  ctx.fillRect(-8,-22,18,16);
+  // little stubby legs
+  ctx.fillStyle='#0e2e32';
+  ctx.beginPath(); ctx.ellipse(-6,0,4,5,Math.PI*0.1,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(6,0,4,5,-Math.PI*0.1,0,Math.PI*2); ctx.fill();
+  // tiny feet
+  ctx.fillStyle='#0a1e22';
+  ctx.beginPath(); ctx.ellipse(-7,5,5,2.5,0,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(7,5,5,2.5,0,0,Math.PI*2); ctx.fill();
 
-  // jacket
-  ctx.fillStyle='#802020';
-  ctx.fillRect(-9,-38,20,18);
-  ctx.fillStyle='#a03030';
-  ctx.fillRect(-9,-34,3,12); ctx.fillRect(8,-34,3,12);
+  // HEAD — big round blob on top
+  ctx.beginPath();
+  ctx.ellipse(0,-36,14,13,0,0,Math.PI*2);
+  ctx.fillStyle='#236068';
+  ctx.fill();
+  // head shine
+  ctx.beginPath();
+  ctx.ellipse(-4,-41,5,4,Math.PI*0.2,0,Math.PI*2);
+  ctx.fillStyle='rgba(130,230,220,0.22)';
+  ctx.fill();
 
-  // neck
-  ctx.fillStyle='#c89060';
-  ctx.fillRect(-3,-44,7,8);
+  // EYES — big round cute eyes
+  const eyeBlink = Math.floor(t*0.5)%8===0 ? 0.2 : 1;
+  // left eye white
+  ctx.beginPath(); ctx.ellipse(-5,-37,4,4*eyeBlink,0,0,Math.PI*2);
+  ctx.fillStyle='#e8f8f4'; ctx.fill();
+  // right eye white
+  ctx.beginPath(); ctx.ellipse(5,-37,4,4*eyeBlink,0,0,Math.PI*2);
+  ctx.fillStyle='#e8f8f4'; ctx.fill();
+  // pupils
+  ctx.beginPath(); ctx.arc(-4.5,-37,2,0,Math.PI*2);
+  ctx.fillStyle='#0a1a1e'; ctx.fill();
+  ctx.beginPath(); ctx.arc(5.5,-37,2,0,Math.PI*2);
+  ctx.fillStyle='#0a1a1e'; ctx.fill();
+  // eye shine dots
+  ctx.fillStyle='rgba(255,255,255,0.9)';
+  ctx.beginPath(); ctx.arc(-3.8,-36.2,0.8,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(6.2,-36.2,0.8,0,Math.PI*2); ctx.fill();
 
-  // head
-  ctx.beginPath(); ctx.arc(0,-52,9,0,Math.PI*2);
-  ctx.fillStyle='#c89060'; ctx.fill();
+  // little antenna/fin on top
+  ctx.strokeStyle='#4ecdc4'; ctx.lineWidth=2; ctx.lineCap='round';
+  ctx.beginPath(); ctx.moveTo(0,-49); ctx.lineTo(3,-56+Math.sin(t*2)*2);
+  ctx.stroke();
+  ctx.beginPath(); ctx.arc(3,-56+Math.sin(t*2)*2,2.5,0,Math.PI*2);
+  ctx.fillStyle='#4ecdc4'; ctx.fill();
 
-  // hat brim + cap
-  ctx.fillStyle='#182018';
-  ctx.fillRect(-11,-60,24,5);
-  ctx.fillRect(-7,-76,16,18);
+  // hat — tiny bucket hat
+  ctx.fillStyle='#2a5a38';
+  ctx.fillRect(-8,-51,16,4); // brim
+  ctx.fillRect(-6,-61,12,12); // crown
+  // hat stripe
+  ctx.fillStyle='#3a8a50';
+  ctx.fillRect(-6,-52,12,2);
 
-  // eyes
-  ctx.fillStyle='#100500';
-  ctx.fillRect(-5,-55,3,3);
-  ctx.fillRect(2,-55,3,3);
+  // ARM holding rod — stubby arm right side
+  ctx.fillStyle='#1a4a50';
+  ctx.beginPath();
+  ctx.ellipse(14,-22,4,8,Math.PI*0.3,0,Math.PI*2);
+  ctx.fill();
 
   ctx.restore();
 
@@ -972,16 +1102,35 @@ function openTab(tab){
 
 function renderInv(){
   const g=document.getElementById('inv-grid');
-  g.innerHTML='';
+  const summary=document.getElementById('inv-summary');
+  g.innerHTML=''; summary.innerHTML='';
   const caught=FISH.filter(f=>(S.inventory[f.id]||0)>0);
-  if(!caught.length){g.innerHTML='<div class="empty-msg">No fish yet!</div>';return;}
+  if(!caught.length){g.innerHTML='<div class="empty-msg">No fish yet — go cast!</div>';return;}
+
+  // Summary chips by rarity
   const order=['mythic','legendary','epic','rare','uncommon','common'];
+  const byCounts={};
+  for(const f of caught){byCounts[f.r]=(byCounts[f.r]||0)+1;}
+  for(const r of order){
+    if(!byCounts[r]) continue;
+    const chip=document.createElement('div');
+    chip.style=`background:rgba(0,0,0,0.4);border:1px solid ${RC[r]};border-radius:4px;padding:3px 10px;font-family:'VT323',monospace;font-size:0.85rem;color:${RC[r]}`;
+    chip.textContent=`${byCounts[r]} ${RL[r]}`;
+    summary.appendChild(chip);
+  }
+
   caught.sort((a,b)=>order.indexOf(a.r)-order.indexOf(b.r)||b.v-a.v);
   for(const f of caught){
     const c=S.inventory[f.id]||0;
     const d=document.createElement('div');
     d.className='inv-card'; d.style.setProperty('--rc',RC[f.r]);
-    d.innerHTML=`<div class="inv-emoji">${f.e}</div><div class="inv-name">${f.name}</div><div class="inv-count" style="color:${RC[f.r]}">×${c}</div><div class="inv-val">${fmt(f.v)}g ea</div><button class="inv-sell" onclick="sellFish('${f.id}')">Sell</button>`;
+    d.innerHTML=`
+      <div class="inv-emoji">${f.e}</div>
+      <div class="inv-name">${f.name}</div>
+      ${c>1?`<div style="font-family:'VT323',monospace;font-size:1.1rem;color:${RC[f.r]};font-weight:bold">×${c}</div>`:''}
+      <div class="inv-val">${fmt(f.v)}g ea</div>
+      ${c>1?`<div style="font-size:0.7rem;color:#f7c948;font-family:'VT323',monospace">= ${fmt(f.v*c)}g total</div>`:''}
+      <button class="inv-sell" onclick="sellFish('${f.id}')">Sell All</button>`;
     g.appendChild(d);
   }
 }
